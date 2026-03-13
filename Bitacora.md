@@ -621,7 +621,143 @@ Los datos retornados por la IA se visualizan con:
 
 ---
 
-## 4. Arquitectura Final del Proyecto
+## 4. Iteraciones de Despliegue en Vercel
+
+### Iteración 7 — Adaptación para Vercel (ambas apps)
+
+**Contexto:** El proyecto se despliega en:
+- Frontend: `https://eco-track-ai-web.vercel.app`
+- Backend: `https://eco-track-ai-api.vercel.app`
+
+**Problema:** Vercel no ejecuta servidores persistentes — solo funciones serverless. NestJS está diseñado como servidor HTTP tradicional, por lo que necesita un adaptador.
+
+**Solución aplicada:**
+
+Se creó `apps/api/api/index.ts` como entry point serverless que envuelve NestJS en un handler de Express compatible con Vercel:
+
+```typescript
+import 'reflect-metadata'  // ← primer import obligatorio para decoradores NestJS
+import express from 'express'
+import { NestFactory } from '@nestjs/core'
+import { ExpressAdapter } from '@nestjs/platform-express'
+
+let cachedApp: Express | null = null  // cache entre invocaciones
+
+async function bootstrap(): Promise<Express> {
+  if (cachedApp) return cachedApp
+  const expressApp = express()
+  const adapter = new ExpressAdapter(expressApp)
+  const app = await NestFactory.create(AppModule, adapter)
+  await app.init()
+  cachedApp = expressApp
+  return cachedApp
+}
+
+export default async function handler(req, res) {
+  const app = await bootstrap()
+  app(req, res)
+}
+```
+
+Se creó `apps/api/vercel.json`:
+```json
+{
+  "builds": [{ "src": "api/index.ts", "use": "@vercel/node" }],
+  "routes": [{ "src": "/(.*)", "dest": "api/index.ts" }]
+}
+```
+
+Se creó `apps/web/vercel.json`:
+```json
+{
+  "installCommand": "cd ../.. && pnpm install --frozen-lockfile",
+  "buildCommand": "cd ../.. && pnpm build --filter=web"
+}
+```
+
+**Variables de entorno requeridas:**
+
+| App | Variable | Valor |
+|---|---|---|
+| `api` | `OPENAI_API_KEY` | `sk-proj-...` |
+| `api` | `NODE_ENV` | `production` |
+| `api` | `OPENAI_MODEL` | `gpt-4o-mini` |
+| `api` | `CORS_ORIGIN` | `https://eco-track-ai-web.vercel.app` |
+| `web` | `NEXT_PUBLIC_API_URL` | `https://eco-track-ai-api.vercel.app` |
+
+---
+
+### Iteración 8 — Bug: FUNCTION_INVOCATION_FAILED en el api
+
+**Síntoma:**
+```
+500: INTERNAL_SERVER_ERROR
+Code: FUNCTION_INVOCATION_FAILED
+```
+
+**Causa raíz 1 — Faltaba `import 'reflect-metadata'`**
+NestJS usa decoradores (`@Injectable`, `@Controller`, `@Module`) que dependen del polyfill `reflect-metadata`. En el `main.ts` local este import era implícito, pero el nuevo entry point serverless lo necesita explícitamente como **primer import** antes de cualquier otro módulo de NestJS.
+
+**Causa raíz 2 — `express` no declarado en `dependencies`**
+Vercel bundlea solo lo que está en `dependencies`. `express` llegaba como dependencia transitiva de `@nestjs/platform-express` pero no estaba garantizado en el bundle. Se añadió explícitamente:
+```json
+"express": "^4.21.2"
+```
+
+**Causa raíz 3 — Import incorrecto de express**
+```typescript
+// ❌ Antes
+const express = require('express') as () => Express
+
+// ✅ Después
+import express from 'express'
+```
+
+---
+
+### Iteración 9 — Bug: "API key de OpenAI no configurada" en el web
+
+**Síntoma:**
+```
+POST https://eco-track-ai-web.vercel.app/api/carbon/analyze 500
+Error: API key de OpenAI no configurada
+```
+
+**Contexto:** `NEXT_PUBLIC_API_URL=https://eco-track-ai-api.vercel.app` estaba correctamente configurada en Vercel.
+
+**Causa raíz:** El Route Handler tenía la validación de `OPENAI_API_KEY` en el orden incorrecto — **antes** de verificar si había un backend NestJS disponible. Bloqueaba toda solicitud aunque nunca fuera a necesitar la key:
+
+```typescript
+// ❌ Orden incorrecto — siempre falla si OPENAI_API_KEY no está en el web
+const apiKey = process.env['OPENAI_API_KEY']
+if (!apiKey) return NextResponse.json({ error: '...' }, { status: 500 })
+
+const backendUrl = process.env['NEXT_PUBLIC_API_URL']
+if (backendUrl) { /* nunca llega aquí */ }
+```
+
+**Solución:** Reorganizar el flujo para evaluar el proxy primero:
+
+```typescript
+// ✅ Orden correcto
+// 1. ¿Hay backend NestJS? → proxy (no necesita OPENAI_API_KEY en el web)
+const backendUrl = process.env['NEXT_PUBLIC_API_URL']
+if (backendUrl && !backendUrl.includes('localhost')) {
+  return fetch(`${backendUrl}/carbon/analyze`, ...)
+}
+
+// 2. Solo si no hay backend → OpenAI directo → ahí sí verifica la key
+const apiKey = process.env['OPENAI_API_KEY']
+if (!apiKey) return NextResponse.json({ error: '...' }, { status: 500 })
+```
+
+El Route Handler también implementa **dual mode**:
+- **Modo proxy**: reenvía al NestJS desplegado (producción con ambas apps)
+- **Modo directo**: llama a OpenAI desde Next.js (desarrollo local o deploy solo del web)
+
+---
+
+## 6. Arquitectura Final del Proyecto
 
 ```
 ecotrack-ai/
@@ -630,21 +766,25 @@ ecotrack-ai/
 ├── turbo.json                   ← Pipeline: dev, build, test, lint
 ├── pnpm-workspace.yaml          ← Workspaces declarados
 ├── tsconfig.base.json           ← TypeScript strict compartido
-├── .env.example                 ← Variables documentadas
+├── .env.example                 ← Variables documentadas (con URLs de producción)
 │
 ├── apps/
-│   ├── web/                     ← Next.js 14 · Puerto 3000
+│   ├── web/                     ← Next.js 14 · eco-track-ai-web.vercel.app
+│   │   ├── vercel.json          ← Config monorepo para Vercel
 │   │   ├── app/
 │   │   │   ├── layout.tsx       ← SEO metadata, fuente Inter, Toaster
 │   │   │   ├── page.tsx         ← Server Component entrada
-│   │   │   └── api/carbon/analyze/route.ts  ← Proxy hacia NestJS
+│   │   │   └── api/carbon/analyze/route.ts  ← Dual mode: proxy NestJS / OpenAI directo
 │   │   ├── components/          ← 7 componentes UI
 │   │   ├── hooks/use-analysis.ts ← Estado + llamadas al backend
 │   │   └── lib/utils.ts         ← cn(), CATEGORY_COLORS, formatCO2
 │   │
-│   └── api/                     ← NestJS 10 · Puerto 3001
+│   └── api/                     ← NestJS 10 · eco-track-ai-api.vercel.app
+│       ├── vercel.json          ← Rutas serverless + builder @vercel/node
+│       ├── api/
+│       │   └── index.ts         ← Entry point serverless (Express adapter + cache)
 │       └── src/
-│           ├── main.ts          ← Bootstrap: CORS, ValidationPipe, Filter
+│           ├── main.ts          ← Bootstrap local: CORS, ValidationPipe, Filter
 │           ├── app.module.ts    ← Módulo raíz + LoggingInterceptor
 │           ├── ai/              ← AiService encapsula OpenAI
 │           ├── carbon/          ← Controller, Service, DTOs
@@ -661,7 +801,7 @@ ecotrack-ai/
 
 ---
 
-## 5. Lecciones Aprendidas
+## 7. Lecciones Aprendidas
 
 | Lección | Detalle |
 |---|---|
@@ -670,6 +810,10 @@ ecotrack-ai/
 | **ESLint en monorepos** | Cada app puede necesitar versiones distintas de ESLint según sus plugins. `eslint-config-next@14` requiere ESLint v7/v8 |
 | **JSON mode de OpenAI** | `response_format: json_object` es suficiente para el MVP. Para producción, considerar usar Structured Outputs con JSON Schema explícito (GPT-4o-2024-08-06+) |
 | **Temperatura baja** | 0.2 es el punto ideal para extracción de datos estructurados — suficiente variabilidad para manejar textos diversos, suficiente consistencia para cifras reproducibles |
+| **NestJS en Vercel** | Vercel corre funciones serverless, no servidores persistentes. NestJS requiere un adaptador Express + cache de instancia entre invocaciones. `reflect-metadata` debe importarse primero |
+| **express en dependencies** | Vercel solo bundlea `dependencies`, no transitivas. Si un paquete se usa en runtime (aunque sea dep de dep), debe declararse explícitamente |
+| **Orden de validaciones en Route Handler** | Las validaciones de fallback (como `OPENAI_API_KEY`) deben ir después de la lógica principal (proxy al backend), no antes. Un check prematuro puede bloquear flujos que nunca usarían esa variable |
+| **Dual mode en Route Handler** | Implementar modo proxy + modo directo permite que el mismo código funcione en desarrollo local (sin backend) y en producción (con backend desplegado), controlado por una variable de entorno |
 
 ---
 
