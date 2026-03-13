@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm:*)",
+      "Bash(mkdir:*)",
+      "Bash(npx tsc:*)",
+      "Bash(node:*)",
+      "Bash(npx nest:*)",
+      "Bash(ls:*)",
+      "Bash(node_modules/.bin/nest build:*)",
+      "Bash(node_modules/.bin/nest start:*)",
+      "Bash(netstat:*)",
+      "Bash(taskkill:*)",
+      "Bash(cmd:*)",
+      "Bash(curl:*)"
+    ]
+  }
+}
