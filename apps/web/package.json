@@ -20,7 +20,8 @@
     "sonner": "^2.0.1",
     "clsx": "^2.1.1",
     "tailwind-merge": "^2.6.0",
-    "lucide-react": "^0.474.0"
+    "lucide-react": "^0.474.0",
+    "openai": "^4.77.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.9",
