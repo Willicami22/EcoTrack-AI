@@ -51,15 +51,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const apiKey = process.env['OPENAI_API_KEY']
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: 'API key de OpenAI no configurada' },
-        { status: 500 }
-      )
-    }
-
-    // Si hay un backend NestJS desplegado, úsalo; si no, llama a OpenAI directamente
+    // Modo 1: proxy al backend NestJS si está configurado
     const backendUrl = process.env['NEXT_PUBLIC_API_URL']
     if (backendUrl && !backendUrl.includes('localhost')) {
       const response = await fetch(`${backendUrl}/carbon/analyze`, {
@@ -72,7 +64,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(data)
     }
 
-    // Modo Vercel / serverless: OpenAI directo desde el servidor Next.js
+    // Modo 2: OpenAI directo (solo cuando no hay backend configurado)
+    const apiKey = process.env['OPENAI_API_KEY']
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: 'API key de OpenAI no configurada' },
+        { status: 500 }
+      )
+    }
+
     const client = new OpenAI({ apiKey })
     const model = process.env['OPENAI_MODEL'] ?? 'gpt-4o-mini'
 
@@ -96,12 +96,9 @@ export async function POST(request: NextRequest) {
     }
 
     const result = JSON.parse(rawContent) as AnalysisResult
-
-    // Recalcular total para consistencia
-    const calculatedTotal = result.activities.reduce(
-      (sum, act) => sum + act.co2_kg_estimate, 0
-    )
-    result.total_co2_kg = Math.round(calculatedTotal * 100) / 100
+    result.total_co2_kg = Math.round(
+      result.activities.reduce((sum, act) => sum + act.co2_kg_estimate, 0) * 100
+    ) / 100
 
     return NextResponse.json(result)
   } catch (error: unknown) {
